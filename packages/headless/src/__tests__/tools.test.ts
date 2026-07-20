@@ -88,8 +88,8 @@ describe('isolated headless tools', () => {
     assert.match(pwshBash.description, /PowerShell 7 \(pwsh\)/);
     assert.match(pwshBash.description, /write PowerShell syntax, not cmd or bash syntax/);
 
-    // No shell (POSIX / remote container): the historical description is the
-    // contract; no dialect sentence is added.
+    // No shell (POSIX / remote container): no dialect sentence is added, but a
+    // search-tool preference hint still steers the model toward Grep/Glob.
     const posixBash = buildIsolatedBashTool({
       async exec() {
         return { exitCode: 0, stdout: '', stderr: '' };

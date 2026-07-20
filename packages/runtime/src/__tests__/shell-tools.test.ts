@@ -29,12 +29,12 @@ describe('Bash tool description declares the executing shell', () => {
     assert.match(tool.description, /Subject to permission policy\.$/);
   });
 
-  test('foreground tool description is unchanged on POSIX', () => {
+  test('foreground tool prefers Grep/Glob on POSIX (no dialect sentence)', () => {
     const tool = buildLocalForegroundBashTool({ shell: { kind: 'posix', displayName: '/bin/sh' } });
-    assert.equal(
-      tool.description,
-      'Run a shell command in the session cwd. Subject to permission policy.',
-    );
+    assert.match(tool.description, /Run a shell command in the session cwd/);
+    assert.match(tool.description, /Grep and Glob/);
+    assert.match(tool.description, /Subject to permission policy\.$/);
+    assert.doesNotMatch(tool.description, /PowerShell|cmd syntax/);
   });
 
   test('background tool tells the model commands run under PowerShell 7', () => {

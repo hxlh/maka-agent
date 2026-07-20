@@ -132,13 +132,20 @@ export function buildPtyShellSpawnPlan(
 }
 
 /**
- * Shell-dialect sentence for Bash tool descriptions. Empty on POSIX (the
- * historical description is the contract there). On Windows this is the other
- * half of shell selection: without it the model guesses the dialect — the
- * original `dir /s /b` bug.
+ * Shell-dialect and search-tool guidance for Bash tool descriptions. On POSIX
+ * there is no dialect sentence (the historical description is the contract for
+ * that), but a tool-preference hint is still emitted so the model reaches for
+ * the dedicated Grep/Glob tools instead of hand-writing `grep`/`find` in Bash.
+ * On Windows this is also the other half of shell selection: without the
+ * dialect sentence the model guesses it — the original `dir /s /b` bug.
  */
 export function bashToolShellGuidance(shell: ShellPlan): string {
-  if (shell.kind === 'posix') return '';
+  if (shell.kind === 'posix') {
+    // No dialect sentence on POSIX (the historical description is the contract
+    // there), but still steer the model toward the dedicated search tools
+    // instead of hand-writing `grep`/`find` in Bash.
+    return 'Prefer the dedicated Grep and Glob tools over `grep` or `find` in Bash; when you must search via Bash, prefer `rg` or `fd` and exclude node_modules and build output.';
+  }
   const dialect =
     shell.kind === 'pwsh'
       ? 'Commands are executed by PowerShell 7 (pwsh); write PowerShell syntax, not cmd or bash syntax.'

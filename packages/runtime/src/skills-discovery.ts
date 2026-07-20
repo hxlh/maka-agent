@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { lstat, readdir, realpath } from 'node:fs/promises';
+import { readdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isPathInside, readContainedRegularFile } from './path-containment.js';
 import { validateSkillMetadata } from './skills-metadata.js';
@@ -380,12 +380,9 @@ async function scanSkillDir(
   });
   let entries: import('node:fs').Dirent[];
   try {
-    const dirStat = await lstat(dir);
-    if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) {
-      return empty([sourceDiagnostic('blocked_path')]);
-    }
-    // Verify the resolved directory has not escaped its containment root via
-    // an ancestor symlink (e.g. `repo/.agents -> /outside`).
+    // Resolve the real path of the directory and verify it stays within the
+    // containment root. Symlinks are allowed as long as the resolved target
+    // remains inside the boundary (e.g. `~/.agents/skills -> ~/.claude/skills`).
     const [rootReal, dirReal] = await Promise.all([realpath(containmentRoot), realpath(dir)]);
     if (!isPathInside(rootReal, dirReal)) {
       return empty([sourceDiagnostic('blocked_path')]);

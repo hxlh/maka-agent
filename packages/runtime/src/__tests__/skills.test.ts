@@ -639,6 +639,64 @@ Open local targets carefully.`,
     });
   });
 
+  it('scanSkills follows a trusted symlinked skills directory inside the containment root', async () => {
+    // Regression: ~/.agents/skills -> ~/.claude/skills is a common trusted
+    // symlink. The previous lstat-based symlink hard-reject dropped all 171
+    // skills. realpath + isPathInside must be the containment authority.
+    await withWorkspace(async (workspaceRoot) => {
+      // Create skills in a sibling "vault" dir, then symlink it in.
+      const vault = await mkdtemp(join(tmpdir(), 'maka-skill-vault-'));
+      try {
+        await mkdir(join(vault, 'linked-helper'), { recursive: true });
+        await writeFile(
+          join(vault, 'linked-helper', 'SKILL.md'),
+          `---\nname: Linked Helper\ndescription: A skill reachable via symlink.\n---\n# Linked Helper\nBody.`,
+          'utf8',
+        );
+        // Symlink workspaceRoot/skills -> vault (trusted: vault realpath is
+        // outside workspaceRoot, so this must still be blocked). Use the
+        // multi-source scan API with an explicit containment root that
+        // wraps both.
+        const bridge = join(workspaceRoot, 'bridge');
+        await mkdir(bridge, { recursive: true });
+        await symlink(vault, join(bridge, 'skills'));
+
+        // Containment root = bridge; skills symlink resolves inside bridge,
+        // so this trusted symlink should be followed.
+        const found = await scanSkills({ dirs: [join(bridge, 'skills')], stateRoot: bridge });
+        assert.equal(found.length, 1);
+        assert.equal(found[0].id, 'linked-helper');
+        assert.equal(found[0].name, 'Linked Helper');
+      } finally {
+        await rm(vault, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it('scanSkills rejects a symlinked skills directory that escapes the containment root', async () => {
+    // A symlink pointing outside the containment root must still be blocked
+    // by the realpath + isPathInside check.
+    await withWorkspace(async (workspaceRoot) => {
+      const outside = await mkdtemp(join(tmpdir(), 'maka-skill-escape-'));
+      try {
+        await mkdir(join(outside, 'escaped-helper'), { recursive: true });
+        await writeFile(
+          join(outside, 'escaped-helper', 'SKILL.md'),
+          `---\nname: Escaped Helper\ndescription: Should not be discoverable.\n---\n# Escaped`,
+          'utf8',
+        );
+        await symlink(outside, join(workspaceRoot, 'skills'));
+
+        // containment root = workspaceRoot; symlink resolves to `outside`
+        // which is NOT inside workspaceRoot → must be rejected.
+        const found = await scanSkills(workspaceRoot);
+        assert.equal(found.length, 0);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
   it('buildSkillAgentTool exposes a read-only Skill tool that loads a single matching local skill', async () => {
     await withWorkspace(async (workspaceRoot) => {
       await writeSkill(

@@ -69,11 +69,11 @@ export async function readContainedRegularFile(
   filePath: string,
 ): Promise<{ ok: true; bytes: Buffer } | { ok: false }> {
   try {
-    const [rootReal, fileStat] = await Promise.all([realpath(rootDir), lstat(filePath)]);
-    if (!fileStat.isFile() || fileStat.isSymbolicLink()) return { ok: false };
+    const rootReal = await realpath(rootDir);
     const fileReal = await realpath(filePath);
     if (!isPathInside(rootReal, fileReal)) return { ok: false };
-    return { ok: true, bytes: await readFile(filePath) };
+    const bytes = await readFile(filePath);
+    return { ok: true, bytes };
   } catch {
     return { ok: false };
   }
@@ -91,9 +91,7 @@ export async function readContainedRegularTextFile(
   | { ok: false; reason: 'blocked_path' | 'read_failed' }
 > {
   try {
-    const [rootReal, fileStat] = await Promise.all([realpath(rootDir), lstat(filePath)]);
-    if (!fileStat.isFile() || fileStat.isSymbolicLink())
-      return { ok: false, reason: 'blocked_path' };
+    const rootReal = await realpath(rootDir);
     const fileReal = await realpath(filePath);
     if (!isPathInside(rootReal, fileReal)) return { ok: false, reason: 'blocked_path' };
     const content = await readFile(filePath, 'utf8');

@@ -65,42 +65,29 @@ export async function readSkillRuntimeState(root: string): Promise<SkillRuntimeS
   const metadataDir = join(root, '.maka');
   const stateFile = join(metadataDir, 'skills-state.json');
   try {
+    // Allow symlinks for the metadata dir / state file as long as the resolved
+    // paths stay inside the root. realpath + isPathInside is the containment
+    // authority; the previous symlink hard-reject blocked legitimate setups
+    // (e.g. `~/.agents -> ~/.claude`) without adding security.
     const rootReal = await realpath(root);
-    const metadataStat = await lstat(metadataDir).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT') return null;
+    let metadataReal: string;
+    try {
+      metadataReal = await realpath(metadataDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+        return { ok: true, states: new Map(), preferences: new Map(), needsReview: new Set(), schemaVersion: 2 };
       throw error;
-    });
-    if (metadataStat === null) {
-      return {
-        ok: true,
-        states: new Map(),
-        preferences: new Map(),
-        needsReview: new Set(),
-        schemaVersion: 2,
-      };
     }
-    if (!metadataStat.isDirectory() || metadataStat.isSymbolicLink())
-      return { ok: false, reason: 'blocked_path' };
-    const metadataReal = await realpath(metadataDir);
     if (!isPathInside(rootReal, metadataReal)) return { ok: false, reason: 'blocked_path' };
 
-    const stateStat = await lstat(stateFile).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT') return null;
+    let stateReal: string;
+    try {
+      stateReal = await realpath(stateFile);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+        return { ok: true, states: new Map(), preferences: new Map(), needsReview: new Set(), schemaVersion: 2 };
       throw error;
-    });
-    if (stateStat === null) {
-      return {
-        ok: true,
-        states: new Map(),
-        preferences: new Map(),
-        needsReview: new Set(),
-        schemaVersion: 2,
-      };
     }
-    if (!stateStat.isFile() || stateStat.isSymbolicLink())
-      return { ok: false, reason: 'blocked_path' };
-
-    const stateReal = await realpath(stateFile);
     if (!isPathInside(metadataReal, stateReal)) return { ok: false, reason: 'blocked_path' };
 
     const parsed = JSON.parse(await readFile(stateFile, 'utf8')) as unknown;

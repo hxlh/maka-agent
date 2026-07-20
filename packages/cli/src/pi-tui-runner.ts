@@ -106,10 +106,10 @@ import {
   ModelSearchOverlay,
   OnboardingWizard,
   PickerOverlay,
+  SkillSearchOverlay,
   UserQuestionOverlay,
   modelPickerItems,
   permissionModePickerItems,
-  skillPickerItems,
   thinkingLevelPickerItems,
   type MakaSlashCommand,
 } from './pi-tui-pickers.js';
@@ -1904,16 +1904,17 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
       requestRender();
       return;
     }
-    showSelectPicker(
-      'Invoke Skill',
-      String(entries.length),
-      skillPickerItems(entries),
-      (item) => {
-        editor.insertTextAtCursor(`/skill:${item.value} `);
+    let overlay: OverlayHandle | undefined;
+    const picker = new SkillSearchOverlay(tui, {
+      skills: entries,
+      onSelect: (skill) => {
+        overlay?.hide();
+        editor.insertTextAtCursor(`/skill:${skill.id} `);
         requestRender();
       },
-      { minPrimaryColumnWidth: 16, maxPrimaryColumnWidth: 40 },
-    );
+      onCancel: () => overlay?.hide(),
+    });
+    overlay = showBottomPicker(picker);
   };
 
   const showThinkingLevelList = () => {

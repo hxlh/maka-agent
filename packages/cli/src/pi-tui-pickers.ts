@@ -723,6 +723,122 @@ export function skillPickerItems(skills: readonly InvocableSkillEntry[]): Select
   }));
 }
 
+
+/**
+ * Case-insensitive substring match for the `/skill` search field, against the
+ * skill id, display name, and description. Gives users a fast fuzzy-style
+ * filter across the full skill catalog (170+ entries on typical installs).
+ */
+function matchesSkill(skill: InvocableSkillEntry, query: string): boolean {
+  if (skill.id.toLowerCase().includes(query)) return true;
+  if (skill.name.toLowerCase().includes(query)) return true;
+  if (skill.description && skill.description.toLowerCase().includes(query)) return true;
+  return false;
+}
+
+export interface SkillSearchOverlayInput {
+  skills: readonly InvocableSkillEntry[];
+  onSelect: (skill: InvocableSkillEntry) => void;
+  onCancel: () => void;
+}
+
+/**
+ * Searchable `/skill` picker — mirrors {@link ModelSearchOverlay} but for the
+ * invocable-skill catalog. A single search field drives a bounded list rebuilt
+ * on every keystroke (SelectList has no setItems). ↑↓ moves the selection,
+ * Enter picks (inserts `/skill:<id> `), Esc / Ctrl-C closes.
+ */
+export class SkillSearchOverlay implements Component {
+  private readonly searchEditor: Editor;
+  private filtered: readonly InvocableSkillEntry[];
+  private list: SelectList;
+
+  constructor(
+    private readonly tui: TUI,
+    private readonly input: SkillSearchOverlayInput,
+  ) {
+    this.filtered = [...input.skills];
+    this.list = this.buildList();
+    this.searchEditor = new Editor(tui, editorTheme(), { paddingX: 0 });
+    this.searchEditor.onChange = (text) => this.applyQuery(text);
+  }
+
+  private buildList(): SelectList {
+    const list = new SelectList(skillPickerItems(this.filtered), 10, selectListTheme(), {
+      minPrimaryColumnWidth: 16,
+      maxPrimaryColumnWidth: 40,
+    });
+    list.onSelect = (item) => {
+      const skill = this.filtered.find((entry) => entry.id === item.value);
+      if (!skill) return;
+      this.input.onSelect(skill);
+    };
+    list.onCancel = () => this.input.onCancel();
+    return list;
+  }
+
+  private applyQuery(text: string): void {
+    const query = text.trim().toLowerCase();
+    const next = query
+      ? this.input.skills.filter((skill) => matchesSkill(skill, query))
+      : this.input.skills;
+    if (next === this.filtered) return;
+    this.filtered = next;
+    this.list = this.buildList();
+  }
+
+  invalidate(): void {
+    this.searchEditor.invalidate();
+    this.list.invalidate();
+  }
+
+  handleInput(data: string): void {
+    if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl('c'))) {
+      this.input.onCancel();
+      return;
+    }
+    if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
+      this.list.handleInput(data);
+      return;
+    }
+    if (matchesKey(data, Key.enter) || matchesKey(data, Key.return)) {
+      if (isKeyRepeat(data)) return;
+      this.list.handleInput(data);
+      return;
+    }
+    this.searchEditor.handleInput(data);
+  }
+
+  render(width: number): string[] {
+    const safeWidth = Math.max(1, width);
+    this.searchEditor.focused = true;
+    return [
+      padLine(`Invoke Skill ${ansi.accent(String(this.filtered.length))}`, safeWidth),
+      padLine(ansi.dim('搜索技能 id / 名称 / 描述 · ↑↓ 选择 · Enter 确认 · Esc 取消'), safeWidth),
+      padLine('', safeWidth),
+      ...this.renderFieldRow(this.searchEditor, '搜索', safeWidth),
+      padLine('', safeWidth),
+      ...(this.filtered.length === 0
+        ? [padLine(ansi.dim('没有匹配的技能'), safeWidth)]
+        : this.list.render(safeWidth).map((line) => formatPickerItemLine(line, safeWidth))),
+      padLine(ansi.accent('-'.repeat(safeWidth)), safeWidth),
+    ];
+  }
+
+  private renderFieldRow(editor: Editor, label: string, width: number): string[] {
+    const prefix = `${label} `;
+    const prefixWidth = visibleWidth(prefix);
+    const contentWidth = Math.max(1, width - prefixWidth);
+    const editorLines = editor.render(contentWidth).slice(1, -1);
+    if (editorLines.length === 0) {
+      return [padLine(prefix, width)];
+    }
+    return editorLines.map((line, index) =>
+      padLine(`${index === 0 ? prefix : ' '.repeat(prefixWidth)}${line}`, width),
+    );
+  }
+}
+
 /** Provider search items for `/setup`, marking connections that already exist
  *  `已设置` so a re-onboard reads as edit/rotate rather than create. */
 export function onboardingProviderPickerItems(

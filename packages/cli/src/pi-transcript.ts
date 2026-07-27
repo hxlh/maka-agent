@@ -33,6 +33,7 @@ import {
   markdownTheme,
   renderIndented,
 } from './pi-transcript-format.js';
+import { visibleWidth } from '@earendil-works/pi-tui';
 import { renderToolBlock } from './pi-transcript-tools.js';
 
 export interface MakaPiUsageSummary {
@@ -1556,13 +1557,20 @@ function pushShellRunSettledNotice(state: MakaPiTranscriptState, entry: MakaPiTo
   });
 }
 
-/** A user turn: a dim `>` quote prefix per line, no speaker label. */
+/** A user turn: full-width brand-blue background block with a `>` prefix. */
 function renderUserBlock(text: string, width: number): string[] {
   if (!text.trim()) return [];
-  const prefix = ansi.dim('>');
+  const prefix = ansi.bold(ansi.accent('>'));
   // renderIndented reserves a 2-column gutter; reuse it and swap the two
   // leading spaces for `> ` so wrapped lines stay aligned under the prefix.
-  return renderIndented(text, width, 2).map((line) => fitLine(`${prefix} ${line.slice(2)}`, width));
+  // Each line is padded to the full terminal width and wrapped in the user
+  // bubble background so the block reads as a solid tinted band.
+  return renderIndented(text, width, 2).map((line) => {
+    const content = `${prefix} ${ansi.userFg(ansi.bold(line.slice(2)))}`;
+    const visibleLen = visibleWidth(content);
+    const pad = Math.max(0, width - visibleLen);
+    return fitLine(`${ansi.userBg(content + ' '.repeat(pad))}`, width);
+  });
 }
 
 /** An assistant turn: bare markdown prose, no speaker label or indent. */

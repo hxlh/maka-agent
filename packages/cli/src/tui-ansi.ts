@@ -6,6 +6,11 @@ const MAKA_LOGO_BLUE_RGB = [87, 163, 239] as const;
 // #1053: neutral cool-grey for muted chrome — done discs and de-emphasised text.
 const MUTED_RGB = [128, 132, 140] as const;
 
+// User message bubble background — soft brand-blue wash derived from --accent.
+// Foreground stays high-contrast white for readability on the tinted surface.
+const USER_BUBBLE_BG_RGB = [30, 50, 85] as const;
+const USER_BUBBLE_FG_RGB = [230, 238, 252] as const;
+
 // #1064: detect terminal color capability at module load so truecolor is
 // downgraded on basic terminals and disabled entirely under NO_COLOR.
 let colorLevel = detectColorLevel();
@@ -92,6 +97,12 @@ function buildAnsi() {
     accent: colorLevel === 0 ? identity : colorFn(MAKA_LOGO_BLUE_RGB, colorLevel),
     muted: colorLevel === 0 ? identity : colorFn(MUTED_RGB, colorLevel),
     reverse: style(7, 27),
+    // Background tint for user message bubbles — a soft brand-blue wash that
+    // fills the full terminal width so user messages stand out from assistant
+    // output. Uses the same color-level detection as accent/muted so it
+    // downgrades gracefully on basic terminals.
+    userBg: colorLevel === 0 ? identity : bgFn(USER_BUBBLE_BG_RGB, colorLevel),
+    userFg: colorLevel === 0 ? identity : colorFn(USER_BUBBLE_FG_RGB, colorLevel),
   };
 }
 
@@ -153,6 +164,46 @@ function colorFn(
 
 function rgb24(red: number, green: number, blue: number): (text: string) => string {
   return (text) => `\x1b[38;2;${red};${green};${blue}m${text}\x1b[39m`;
+}
+
+/** Background color function (same level logic as colorFn but with 48; / 49m). */
+function bgFn(
+  rgb: readonly [number, number, number],
+  level: 1 | 2 | 3,
+): (text: string) => string {
+  if (level === 3) return bg24(...rgb);
+  if (level === 2) return bg256(...rgb);
+  return bg16(...rgb);
+}
+
+function bg24(red: number, green: number, blue: number): (text: string) => string {
+  return (text) => `\x1b[48;2;${red};${green};${blue}m${text}\x1b[49m`;
+}
+
+function bg256(red: number, green: number, blue: number): (text: string) => string {
+  const index = nearest256(red, green, blue);
+  return (text) => `\x1b[48;5;${index}m${text}\x1b[49m`;
+}
+
+function bg16(red: number, green: number, blue: number): (text: string) => string {
+  const palette: ReadonlyArray<readonly [number, number, number]> = [
+    [0, 0, 0], [128, 0, 0], [0, 128, 0], [128, 128, 0],
+    [0, 0, 128], [128, 0, 128], [0, 128, 128], [192, 192, 192],
+    [128, 128, 128], [255, 0, 0], [0, 255, 0], [255, 255, 0],
+    [0, 0, 255], [255, 0, 255], [0, 255, 255], [255, 255, 255],
+  ];
+  let best = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < palette.length; i++) {
+    const [r, g, b] = palette[i]!;
+    const dist = (red - r) ** 2 + (green - g) ** 2 + (blue - b) ** 2;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = i;
+    }
+  }
+  const code = best < 8 ? 40 + best : 100 + (best - 8);
+  return (text) => `\x1b[${code}m${text}\x1b[49m`;
 }
 
 /**

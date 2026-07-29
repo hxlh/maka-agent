@@ -32,6 +32,170 @@ export interface ModelFactoryInput {
 }
 
 const ANTHROPIC_BETA = 'interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14';
+
+/**
+ * Anthropic-compatible relays (one-api/new-api style gateways fronting
+ * non-Anthropic models) deviate from the strict Anthropic response schema in
+ * two observed ways:
+ *
+ * 1. Non-streaming JSON responses omit `signature` on thinking content
+ *    blocks. The real Anthropic API always sends it, and the AI SDK's
+ *    non-streaming response schema requires it — so a relay response fails
+ *    type validation ("Invalid JSON response") in every generateText caller
+ *    (session titling, history compaction, approval review). Patch the
+ *    missing signature with an empty placeholder.
+ * 2. SSE streams emit keepalive pings as `event: ping` with `data: {}`,
+ *    while the real API sends the type discriminator inside the payload
+ *    (`data: {"type":"ping"}`). The SDK validates the payload alone against
+ *    its chunk union, so the discriminator-less chunk kills the whole stream
+ *    with AI_TypeValidationError ("No matching discriminator"). Repair any
+ *    SSE event block whose data payload lacks a `type` by injecting the
+ *    block's declared event name.
+ *
+ * Only wired for `anthropic-compatible` connections; native Anthropic keeps
+ * the strict path untouched.
+ */
+function anthropicCompatibleRelayFetch(fetchFn: typeof fetch | undefined): typeof fetch {
+  const impl = fetchFn ?? globalThis.fetch;
+  return async (url, init) => {
+    const response = await impl(url, init);
+    const contentType = response.headers.get('content-type') ?? '';
+    // Patched bodies differ in length and are already decoded, so the
+    // original framing headers no longer describe them.
+    if (contentType.includes('text/event-stream')) {
+      const headers = new Headers(response.headers);
+      headers.delete('content-length');
+      headers.delete('content-encoding');
+      return new Response(
+        response.body === null
+          ? null
+          : response.body.pipeThrough(anthropicSseTypeRepairTransform()),
+        {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        },
+      );
+    }
+    if (!contentType.includes('application/json')) return response;
+    const body = await response.text();
+    const headers = new Headers(response.headers);
+    headers.delete('content-length');
+    headers.delete('content-encoding');
+    return new Response(patchMissingThinkingSignatures(body), {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  };
+}
+
+const ANTHROPIC_SSE_EVENT_TYPES = new Set([
+  'message_start',
+  'content_block_start',
+  'content_block_delta',
+  'content_block_stop',
+  'message_delta',
+  'message_stop',
+  'ping',
+  'error',
+]);
+
+/**
+ * Streaming pass over an SSE byte stream that repairs event blocks whose
+ * data payload is missing the `type` discriminator declared by the block's
+ * `event:` line. Blocks are only rewritten when the event name is a known
+ * Anthropic SSE type and the payload parses to an object without a string
+ * `type`; everything else (including comment lines and multi-data blocks)
+ * passes through byte-identical.
+ */
+function anthropicSseTypeRepairTransform(): TransformStream<Uint8Array, Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let pending = '';
+  let block: string[] = [];
+  const flushBlock = (controller: TransformStreamDefaultController<Uint8Array>): void => {
+    if (block.length === 0) return;
+    controller.enqueue(encoder.encode(repairSseEventBlock(block).join('\n') + '\n'));
+    block = [];
+  };
+  return new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      pending += decoder.decode(chunk, { stream: true });
+      let newlineIndex = pending.indexOf('\n');
+      while (newlineIndex !== -1) {
+        const line = pending.slice(0, newlineIndex);
+        pending = pending.slice(newlineIndex + 1);
+        if (line === '' || line === '\r') {
+          flushBlock(controller);
+          controller.enqueue(encoder.encode(line + '\n'));
+        } else {
+          block.push(line);
+        }
+        newlineIndex = pending.indexOf('\n');
+      }
+    },
+    flush(controller) {
+      const rest = pending + decoder.decode();
+      if (rest.length > 0) block.push(rest);
+      flushBlock(controller);
+    },
+  });
+}
+
+function repairSseEventBlock(block: string[]): string[] {
+  let eventName: string | undefined;
+  let dataIndex = -1;
+  let dataCount = 0;
+  for (let index = 0; index < block.length; index += 1) {
+    const line = block[index];
+    if (line.startsWith('event:')) {
+      eventName = line.slice('event:'.length).trim();
+    } else if (line.startsWith('data:')) {
+      if (dataIndex === -1) dataIndex = index;
+      dataCount += 1;
+    }
+  }
+  if (eventName === undefined || dataIndex === -1 || dataCount !== 1) return block;
+  if (!ANTHROPIC_SSE_EVENT_TYPES.has(eventName)) return block;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(block[dataIndex].slice('data:'.length).trim());
+  } catch {
+    return block;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return block;
+  if (typeof (parsed as { type?: unknown }).type === 'string') return block;
+  const repaired = block.slice();
+  repaired[dataIndex] = `data: ${JSON.stringify({ type: eventName, ...parsed })}`;
+  return repaired;
+}
+
+function patchMissingThinkingSignatures(body: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return body;
+  }
+  if (parsed === null || typeof parsed !== 'object') return body;
+  const content = (parsed as { content?: unknown }).content;
+  if (!Array.isArray(content)) return body;
+  let changed = false;
+  for (const block of content) {
+    if (
+      block !== null &&
+      typeof block === 'object' &&
+      (block as { type?: unknown }).type === 'thinking' &&
+      typeof (block as { signature?: unknown }).signature !== 'string'
+    ) {
+      (block as { signature?: unknown }).signature = '';
+      changed = true;
+    }
+  }
+  return changed ? JSON.stringify(parsed) : body;
+}
+
 export function getAIModel(input: ModelFactoryInput): LanguageModelV4 {
   const { connection, apiKey, modelId, fetch, kimiOpenAiTransportState } = input;
   const { adapter, baseUrl: baseURL, apiProtocol } = resolveModelRuntime(connection, modelId);
@@ -45,7 +209,10 @@ export function getAIModel(input: ModelFactoryInput): LanguageModelV4 {
       return createAnthropic({
         ...(adapter.auth === 'bearer' ? { authToken: apiKey } : { apiKey }),
         baseURL: adapter.normalizeBaseUrl ? anthropicV1BaseUrl(baseURL) : baseURL,
-        fetch,
+        fetch:
+          connection.providerType === 'anthropic-compatible'
+            ? anthropicCompatibleRelayFetch(fetch)
+            : fetch,
         headers: { 'anthropic-beta': ANTHROPIC_BETA },
       }).chat(modelId);
 

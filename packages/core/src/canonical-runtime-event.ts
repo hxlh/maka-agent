@@ -23,13 +23,87 @@ export function encodeCanonicalRuntimeEvent(value: unknown): CanonicalRuntimeEve
   try {
     json = stableJsonStringify(decoded);
   } catch (cause) {
-    throw new Error('RuntimeEvent is not losslessly serializable', { cause });
+    throw new Error(
+      `RuntimeEvent is not losslessly serializable (${describeRuntimeEventForError(decoded)}, first invalid value at ${findFirstNonStrictJsonPath(decoded) ?? 'unknown'})`,
+      { cause },
+    );
   }
   const event = decodeRuntimeEvent(JSON.parse(json));
   if (!nodeUtil.isDeepStrictEqual(decoded, event)) {
-    throw new Error('RuntimeEvent is not losslessly serializable');
+    throw new Error(
+      `RuntimeEvent is not losslessly serializable (${describeRuntimeEventForError(decoded)}, round-trip mismatch at ${firstDivergentPath(decoded, event)})`,
+    );
   }
   return { event, json };
+}
+
+function describeRuntimeEventForError(event: RuntimeEvent): string {
+  const contentKind =
+    event.content && typeof event.content === 'object'
+      ? (event.content as { kind?: unknown }).kind
+      : undefined;
+  return `id=${event.id}, content=${typeof contentKind === 'string' ? contentKind : 'none'}`;
+}
+
+/**
+ * Mirror of the strict-JSON checks in tool-args-identity's canonicalizeStrictJson,
+ * but returns the offending path instead of throwing so writers can diagnose
+ * exactly which field of an event is not persistable.
+ */
+function findFirstNonStrictJsonPath(value: unknown, path = '$'): string | undefined {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean')
+    return undefined;
+  if (typeof value === 'number') return Number.isFinite(value) ? undefined : path;
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) return path;
+    for (let index = 0; index < value.length; index += 1) {
+      const hit = findFirstNonStrictJsonPath(value[index], `${path}[${index}]`);
+      if (hit) return hit;
+    }
+    return undefined;
+  }
+  if (typeof value === 'object') {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return path;
+    for (const key of Object.keys(value)) {
+      const nested = (value as Record<string, unknown>)[key];
+      const hit = findFirstNonStrictJsonPath(nested, `${path}.${key}`);
+      if (hit) return hit;
+    }
+    return undefined;
+  }
+  // undefined, bigint, symbol, function — none are strict JSON.
+  return path;
+}
+
+function firstDivergentPath(actual: unknown, expected: unknown, path = '$'): string {
+  if (nodeUtil.isDeepStrictEqual(actual, expected)) return path;
+  if (
+    actual !== null &&
+    expected !== null &&
+    typeof actual === 'object' &&
+    typeof expected === 'object'
+  ) {
+    if (Array.isArray(actual) && Array.isArray(expected)) {
+      const length = Math.max(actual.length, expected.length);
+      for (let index = 0; index < length; index += 1) {
+        if (!nodeUtil.isDeepStrictEqual(actual[index], expected[index])) {
+          return firstDivergentPath(actual[index], expected[index], `${path}[${index}]`);
+        }
+      }
+      return path;
+    }
+    const keys = new Set([...Object.keys(actual), ...Object.keys(expected)]);
+    for (const key of keys) {
+      const actualValue = (actual as Record<string, unknown>)[key];
+      const expectedValue = (expected as Record<string, unknown>)[key];
+      if (!nodeUtil.isDeepStrictEqual(actualValue, expectedValue)) {
+        return firstDivergentPath(actualValue, expectedValue, `${path}.${key}`);
+      }
+    }
+    return path;
+  }
+  return path;
 }
 
 function normalizeRuntimeEventEnvelope(event: RuntimeEvent): RuntimeEvent {

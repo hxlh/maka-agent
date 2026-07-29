@@ -11,6 +11,7 @@ import {
   type LlmConnection,
   type UpdateConnectionInput,
 } from '@maka/core/llm-connections';
+import { syncDeclaredThinkingOptions } from '@maka/core/model-thinking';
 
 export interface ConnectionStore {
   list(): Promise<LlmConnection[]>;
@@ -246,6 +247,11 @@ class FileConnectionStore implements ConnectionStore {
       const connections = parsed.connections.map((connection) =>
         migrateConnectionV1ToV2(connection),
       );
+      // Publish user-declared thinking options to the registry overlay so
+      // generic relay models (whose backing model the static registry cannot
+      // know) expose the thinking switcher. Refresh on every read: startup
+      // and mid-session edits converge on the file's exact declarations.
+      syncDeclaredThinkingOptions(connections);
       return {
         defaultSlug: normalizeDefaultSlug(parsed.defaultSlug, connections),
         connections,

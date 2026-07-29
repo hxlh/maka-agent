@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { LlmConnection } from '@maka/core';
-import { thinkingVariantsForModel, type ThinkingLevel } from '@maka/core';
+import { syncDeclaredThinkingOptions, thinkingVariantsForModel, type ThinkingLevel } from '@maka/core';
 import { changesBackendConfig, buildProviderOptions, getAIModel } from '@maka/runtime';
 
 function conn(providerType: LlmConnection['providerType'], slug = 'test'): LlmConnection {
@@ -582,5 +582,74 @@ describe('changesBackendConfig', () => {
     // how the bot guard's re-pin to `explore` became advisory.
     assert.equal(changesBackendConfig({ permissionMode: 'explore' }), true);
     assert.equal(changesBackendConfig({ permissionMode: 'bypass' }), true);
+  });
+});
+
+describe('buildProviderOptions: anthropic-compatible relay thinking', () => {
+  const relayConn = (): LlmConnection => ({
+    slug: 'relay',
+    name: 'relay',
+    providerType: 'anthropic-compatible',
+    defaultModel: 'kimi-coding-apikey/k3',
+    enabled: true,
+    createdAt: 0,
+    updatedAt: 0,
+    models: [
+      {
+        id: 'kimi-coding-apikey/k3',
+        thinkingOptions: {
+          efforts: ['low', 'medium', 'high'],
+          offBehavior: 'anthropic-thinking-disabled',
+        },
+      },
+    ],
+  });
+
+  test('declared levels map to anthropic thinking budgets; off maps to disabled', () => {
+    syncDeclaredThinkingOptions([relayConn()]);
+    try {
+      assert.deepEqual(
+        [...thinkingVariantsForModel('anthropic-compatible', 'kimi-coding-apikey/k3')],
+        ['off', 'low', 'medium', 'high'],
+      );
+      const connection = relayConn();
+      const modelId = 'kimi-coding-apikey/k3';
+      assert.deepEqual(buildProviderOptions(connection, modelId, 'low'), {
+        anthropic: { thinking: { type: 'enabled', budgetTokens: 1024 } },
+      });
+      assert.deepEqual(buildProviderOptions(connection, modelId, 'medium'), {
+        anthropic: { thinking: { type: 'enabled', budgetTokens: 8192 } },
+      });
+      assert.deepEqual(buildProviderOptions(connection, modelId, 'high'), {
+        anthropic: { thinking: { type: 'enabled', budgetTokens: 32768 } },
+      });
+      assert.deepEqual(buildProviderOptions(connection, modelId, 'off'), {
+        anthropic: { thinking: { type: 'disabled' } },
+      });
+      // No level (default) and undeclared levels send nothing.
+      assert.deepEqual(buildProviderOptions(connection, modelId), {});
+      assert.deepEqual(buildProviderOptions(connection, modelId, 'max'), {});
+    } finally {
+      syncDeclaredThinkingOptions([]);
+    }
+  });
+
+  test('off sends nothing when the declaration lacks a disabled wire', () => {
+    const connection = relayConn();
+    connection.models = [
+      { id: 'kimi-coding-apikey/k3', thinkingOptions: { efforts: ['low', 'high'] } },
+    ];
+    syncDeclaredThinkingOptions([connection]);
+    try {
+      // Without offBehavior the switcher does not offer off at all…
+      assert.deepEqual(
+        [...thinkingVariantsForModel('anthropic-compatible', 'kimi-coding-apikey/k3')],
+        ['low', 'high'],
+      );
+      // …and the wire mapping never emits thinking.disabled on a guess.
+      assert.deepEqual(buildProviderOptions(connection, 'kimi-coding-apikey/k3', 'off'), {});
+    } finally {
+      syncDeclaredThinkingOptions([]);
+    }
   });
 });

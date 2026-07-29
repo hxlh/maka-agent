@@ -17,7 +17,7 @@
  * per-model supported set, so the UI and runtime share one source of truth.
  */
 
-import type { ProviderType } from './llm-connections.js';
+import type { LlmConnection, ProviderType } from './llm-connections.js';
 import { lookupModelMetadata } from './model-metadata.js';
 
 /**
@@ -87,7 +87,41 @@ export function deriveThinkingChoices(
 }
 
 /**
- * Per-model reasoning options declared in `model-metadata.ts`
+ * User-declared thinking options, keyed by `${providerType}\n${modelId}`.
+ * Generic relay connections (`anthropic-compatible`, `openai-compatible`)
+ * proxy user-configured models the static registry cannot know, so the
+ * connection file may declare `models[].thinkingOptions` instead. Declared
+ * options take precedence over the registry — the user knows their relay's
+ * backing model better than the shipped heuristics.
+ */
+const declaredThinkingOptions = new Map<string, ThinkingOptions>();
+
+function declaredThinkingKey(providerType: ProviderType, modelId: string): string {
+  return `${providerType}\n${modelId.trim()}`;
+}
+
+/**
+ * Replace the declared-options overlay with what the given connections
+ * declare. Called whenever the connection file is (re)loaded so startup and
+ * edits both converge on exactly the file's declarations.
+ */
+export function syncDeclaredThinkingOptions(connections: readonly LlmConnection[]): void {
+  declaredThinkingOptions.clear();
+  for (const connection of connections) {
+    for (const model of connection.models ?? []) {
+      if (model.thinkingOptions) {
+        declaredThinkingOptions.set(
+          declaredThinkingKey(connection.providerType, model.id),
+          model.thinkingOptions,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Per-model reasoning options, user-declared first (see
+ * `syncDeclaredThinkingOptions`), then the `model-metadata.ts` registry
  * (mirroring models.dev `reasoning_options`). Returns `undefined` for models
  * with no declared options (miss → `thinkingVariantsForModel` returns `[]`).
  */
@@ -95,7 +129,10 @@ export function thinkingOptionsForModel(
   providerType: ProviderType,
   modelId: string,
 ): ThinkingOptions | undefined {
-  return lookupModelMetadata(providerType, modelId).thinkingOptions;
+  return (
+    declaredThinkingOptions.get(declaredThinkingKey(providerType, modelId)) ??
+    lookupModelMetadata(providerType, modelId).thinkingOptions
+  );
 }
 
 /**

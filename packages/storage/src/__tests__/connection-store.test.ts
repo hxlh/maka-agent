@@ -1285,6 +1285,49 @@ describe('FileConnectionStore', () => {
   });
 });
 
+describe('thinking options declaration', () => {
+  test('reading the connection file registers declared thinking options into the overlay', async () => {
+    const { thinkingVariantsForModel } = await import('@maka/core/model-thinking');
+    await withConnectionStore(async (store, dir) => {
+      await writeFile(
+        join(dir, 'llm-connections.json'),
+        JSON.stringify({
+          defaultSlug: 'relay',
+          connections: [
+            {
+              slug: 'relay',
+              name: 'relay',
+              providerType: 'anthropic-compatible',
+              defaultModel: 'vendor/relay-model',
+              enabled: true,
+              createdAt: 0,
+              updatedAt: 0,
+              models: [
+                {
+                  id: 'vendor/relay-model',
+                  thinkingOptions: {
+                    efforts: ['low', 'high'],
+                    offBehavior: 'anthropic-thinking-disabled',
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+        'utf8',
+      );
+      assert.deepEqual(thinkingVariantsForModel('anthropic-compatible', 'vendor/relay-model'), []);
+      const connections = await store.list();
+      assert.equal(connections[0]?.models?.[0]?.thinkingOptions !== undefined, true);
+      assert.deepEqual(thinkingVariantsForModel('anthropic-compatible', 'vendor/relay-model'), [
+        'off',
+        'low',
+        'high',
+      ]);
+    });
+  });
+});
+
 async function withConnectionStore<T>(
   fn: (store: ReturnType<typeof createConnectionStore>, dir: string) => Promise<T>,
 ): Promise<T> {

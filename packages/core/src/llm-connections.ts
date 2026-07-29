@@ -6,6 +6,7 @@
  */
 
 import type { BackendKind } from './session.js';
+import type { ThinkingOptions } from './model-thinking.js';
 import {
   CATALOG_PROVIDER_TYPES,
   PROVIDER_REGISTRY,
@@ -57,6 +58,14 @@ export interface ModelInfo {
     functionCalling?: boolean;
     imageGeneration?: boolean;
   };
+  /**
+   * User-declared reasoning controls for models the static registry cannot
+   * know (generic relay connections such as `anthropic-compatible`, where the
+   * backing model is whatever the gateway proxies). Registered into the
+   * thinking overlay when the connection file loads; takes precedence over
+   * the registry. See `ThinkingOptions` in model-thinking.ts.
+   */
+  thinkingOptions?: ThinkingOptions;
 }
 
 export type ModelDiscoverySource = 'fetched' | 'fallback';

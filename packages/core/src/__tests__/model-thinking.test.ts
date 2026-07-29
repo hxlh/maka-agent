@@ -1,12 +1,31 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
+import type { LlmConnection } from '../llm-connections.js';
+import type { ThinkingOptions } from '../model-thinking.js';
 import {
   THINKING_LEVELS,
   deriveThinkingChoices,
   isThinkingLevel,
+  syncDeclaredThinkingOptions,
   thinkingOptionsForModel,
   thinkingVariantsForModel,
 } from '../model-thinking.js';
+
+function connectionWithModels(
+  providerType: LlmConnection['providerType'],
+  models: Array<{ id: string; thinkingOptions?: ThinkingOptions }>,
+): LlmConnection {
+  return {
+    slug: 'test',
+    name: 'test',
+    providerType,
+    defaultModel: models[0]?.id ?? 'm',
+    enabled: true,
+    createdAt: 0,
+    updatedAt: 0,
+    models,
+  };
+}
 
 describe('deriveThinkingChoices', () => {
   test('effort "none" surfaces as off; other efforts map to same-named levels', () => {
@@ -359,5 +378,67 @@ describe('isThinkingLevel / THINKING_LEVELS', () => {
     assert.equal(isThinkingLevel('default'), false);
     assert.equal(isThinkingLevel(undefined), false);
     assert.equal(isThinkingLevel(123), false);
+  });
+});
+
+
+describe('syncDeclaredThinkingOptions (connection-declared overlay)', () => {
+  test('declared options make generic relay models expose the switcher', () => {
+    const relay = connectionWithModels('anthropic-compatible', [
+      {
+        id: 'kimi-coding-apikey/k3',
+        thinkingOptions: {
+          efforts: ['low', 'medium', 'high'],
+          offBehavior: 'anthropic-thinking-disabled',
+        },
+      },
+    ]);
+    assert.deepEqual(
+      [...thinkingVariantsForModel('anthropic-compatible', 'kimi-coding-apikey/k3')],
+      [],
+    );
+    try {
+      syncDeclaredThinkingOptions([relay]);
+      assert.deepEqual(
+        [...thinkingVariantsForModel('anthropic-compatible', 'kimi-coding-apikey/k3')],
+        ['off', 'low', 'medium', 'high'],
+      );
+      assert.deepEqual(
+        thinkingOptionsForModel('anthropic-compatible', 'kimi-coding-apikey/k3'),
+        { efforts: ['low', 'medium', 'high'], offBehavior: 'anthropic-thinking-disabled' },
+      );
+    } finally {
+      syncDeclaredThinkingOptions([]);
+    }
+    assert.deepEqual(
+      [...thinkingVariantsForModel('anthropic-compatible', 'kimi-coding-apikey/k3')],
+      [],
+    );
+  });
+
+  test('declared options take precedence over the registry and resync replaces stale entries', () => {
+    // deepseek/deepseek-v4-flash has registry options [high, max]; a declared
+    // overlay for the same key must win.
+    const override = connectionWithModels('deepseek', [
+      { id: 'deepseek-v4-flash', thinkingOptions: { efforts: ['low'] } },
+    ]);
+    const other = connectionWithModels('anthropic-compatible', [
+      { id: 'relay/model', thinkingOptions: { efforts: ['medium'] } },
+    ]);
+    try {
+      syncDeclaredThinkingOptions([override, other]);
+      assert.deepEqual([...thinkingVariantsForModel('deepseek', 'deepseek-v4-flash')], ['low']);
+      assert.deepEqual(
+        [...thinkingVariantsForModel('anthropic-compatible', 'relay/model')],
+        ['medium'],
+      );
+      // Resync without `other` drops its declaration but keeps the override.
+      syncDeclaredThinkingOptions([override]);
+      assert.deepEqual([...thinkingVariantsForModel('anthropic-compatible', 'relay/model')], []);
+      assert.deepEqual([...thinkingVariantsForModel('deepseek', 'deepseek-v4-flash')], ['low']);
+    } finally {
+      syncDeclaredThinkingOptions([]);
+    }
+    assert.deepEqual([...thinkingVariantsForModel('deepseek', 'deepseek-v4-flash')], ['high', 'max']);
   });
 });

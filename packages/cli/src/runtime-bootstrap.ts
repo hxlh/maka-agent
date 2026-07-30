@@ -36,6 +36,7 @@ import {
   assertProductBindingCatalogClean,
   AGENT_TOOL_GROUP_ID,
   buildLlmHistorySummarizer,
+  buildMcpTools,
   cleanupLegacyHistoryCompactArtifacts,
   buildProviderOptions,
   buildSubscriptionModelFetch,
@@ -67,6 +68,7 @@ import {
   openRuntimeEventPersistence,
   createForeignSessionStore,
   createGitWorktreeChildExecutor,
+  createMcpConfigStore,
   createReadImageSnapshotter,
   createSessionStore,
   createSettingsStore,
@@ -76,6 +78,7 @@ import {
   persistProviderRequestCaptureArtifact,
 } from '@maka/storage';
 import { createAgentGraphControlStore } from '@maka/storage/agent-graph-control-store';
+import { McpClientManager } from '@maka/mcp';
 import { resolveStorageRoot } from '@maka/storage/root-authority';
 import { resolveWorkspaceIdentity } from '@maka/storage/workspace-identity';
 import { fetchProviderModels } from '@maka/runtime';
@@ -245,6 +248,20 @@ export async function createMakaCliRuntimeContext(
   const connectionStore = createConnectionStore(configRoot);
   const credentialStore = createFileCredentialStore(configRoot);
   const settingsStore = createSettingsStore(configRoot);
+  // MCP servers declared in mcp.json become proxy tools on the session tool
+  // surface (same pattern as the desktop host). Connect in parallel with the
+  // rest of bootstrap: a down/slow server must not serialize into startup
+  // (remoteConnectMs defaults to 30s). sync() swallows per-server failures
+  // into error statuses, and an absent/empty config short-circuits to a
+  // resolved promise so MCP-free setups pay nothing.
+  const mcpConfigStore = createMcpConfigStore(configRoot);
+  const mcpManager = new McpClientManager({ clientName: 'maka-cli' });
+  const mcpStartup = mcpConfigStore
+    .get()
+    .then((config) =>
+      Object.keys(config.mcpServers).length > 0 ? mcpManager.sync(config) : undefined,
+    )
+    .catch(() => {});
   // Read-only scanner over other agents' local session stores (~/.claude,
   // ~/.codex). Independent of the Maka workspace — takes no workspaceRoot.
   const foreignSessions = createForeignSessionStore();
@@ -616,7 +633,11 @@ export async function createMakaCliRuntimeContext(
       economy: input.surface === 'tui' && !process.env.MAKA_DISABLE_DEFERRED_TOOLS,
     },
   });
-  const allTools = [...cliProductToolSurface.tools];
+  // MCP tools join the surface only after the startup sync settles; servers
+  // that failed to connect contribute no tools (their status carries the
+  // error, and buildMcpTools filters to connected servers).
+  await mcpStartup;
+  const allTools = [...cliProductToolSurface.tools, ...buildMcpTools(mcpManager)];
 
   backends.register('ai-sdk', async (ctx) => {
     const header =
@@ -1090,6 +1111,7 @@ export async function createMakaCliRuntimeContext(
       automationScheduler.dispose();
       goalContinuation.dispose();
       goalManager.dispose();
+      await mcpManager.close();
       await agentGraphSupervisorWakeCoordinator?.close();
       await agentGraphCoordinator?.close();
       agentGraphControlStore?.close();

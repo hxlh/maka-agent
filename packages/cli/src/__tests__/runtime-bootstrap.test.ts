@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, test } from 'node:test';
 import {
   createConnectionStore,
@@ -296,6 +297,57 @@ describe('Maka CLI runtime bootstrap', () => {
         edit,
         'Edit must be registered (regression: it was once filtered out of the TUI runtime)',
       );
+    });
+  });
+
+  test('exposes mcp.json servers as proxy tools on the runtime toolset', async () => {
+    await withWorkspace(async (workspaceRoot) => {
+      const connectionStore = createConnectionStore(workspaceRoot);
+      await connectionStore.create({
+        slug: 'local',
+        name: 'Local Ollama',
+        providerType: 'ollama',
+        defaultModel: 'llama3.2',
+      });
+      // Same fixture the @maka/mcp manager tests spawn; the relative depth is
+      // identical from src/__tests__ (tsx) and dist/__tests__ (node --test).
+      const fixturePath = fileURLToPath(
+        new URL('../../../mcp/dist/__fixtures__/stdio-server.js', import.meta.url),
+      );
+      await writeFile(
+        join(workspaceRoot, 'mcp.json'),
+        JSON.stringify({
+          version: 1,
+          mcpServers: { fixture: { command: process.execPath, args: [fixturePath] } },
+        }),
+      );
+
+      const context = await createMakaCliRuntimeContext({
+        surface: 'tui',
+        workspaceRoot,
+        cwd: '/repo',
+      });
+      try {
+        const echo = context.tools.find((tool) => tool.name === 'mcp__fixture__echo');
+        assert.ok(echo, 'mcp.json servers must surface as mcp__<server>__<tool> proxy tools');
+        const result = await echo.impl(
+          { value: 'hello-mcp' },
+          {
+            sessionId: 'session-1',
+            turnId: 'turn-1',
+            cwd: workspaceRoot,
+            toolCallId: 'tool-1',
+            abortSignal: new AbortController().signal,
+            emitOutput: () => {},
+          },
+        );
+        assert.ok(
+          JSON.stringify(result).includes('hello-mcp'),
+          'proxy tool call must round-trip through the MCP server',
+        );
+      } finally {
+        await context.close();
+      }
     });
   });
 

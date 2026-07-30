@@ -24,3 +24,7 @@ apps/desktop/resources/bin/
 # Generated desktop release inputs and outputs.
 apps/desktop/resources/tools/
 apps/desktop/release/
+
+# core dumps from crash-recovery tests (root-authority abort fixtures)
+core
+core.*

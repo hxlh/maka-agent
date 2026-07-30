@@ -542,10 +542,13 @@ export function buildProviderOptions(
     }
     // Anthropic-compatible relays (one-api/new-api style gateways) have no
     // registry-known effort enum, but the Anthropic thinking block is the
-    // shared wire they all translate: budget_tokens is how a relay maps the
-    // level onto its backing model (e.g. OmniRoute's budgetToEffort:
-    // <=1024 low, <=10240 medium, above that high). Off is only offered when
-    // the user declares the relay honors thinking.disabled.
+    // shared wire they all translate. Send both forms: an explicit `effort`
+    // (the SDK emits it as output_config.effort, which relays like OmniRoute
+    // read ahead of budgets) for every level the SDK's effort enum supports,
+    // and a budget_tokens fallback for relays that only map budgets (e.g.
+    // OmniRoute's budgetToEffort: <=1024 low, <=10240 medium, above that
+    // high). Off is only offered when the user declares the relay honors
+    // thinking.disabled.
     case 'anthropic-compatible': {
       if (level === 'off') {
         return thinkingOptions?.offBehavior === 'anthropic-thinking-disabled'
@@ -554,9 +557,16 @@ export function buildProviderOptions(
       }
       if (!level) return {};
       const budgetTokens = ANTHROPIC_RELAY_THINKING_BUDGETS[level];
-      return budgetTokens === undefined
-        ? {}
-        : { anthropic: { thinking: { type: 'enabled' as const, budgetTokens } } };
+      if (budgetTokens === undefined) return {};
+      // The SDK's effort enum is low|medium|high|xhigh|max; minimal has no
+      // enum value and travels as budget only.
+      const effort = level === 'minimal' ? undefined : level;
+      return {
+        anthropic: {
+          thinking: { type: 'enabled' as const, budgetTokens },
+          ...(effort ? { effort } : {}),
+        },
+      };
     }
     case 'openai-codex':
       return {

@@ -605,7 +605,7 @@ describe('buildProviderOptions: anthropic-compatible relay thinking', () => {
     ],
   });
 
-  test('declared levels map to anthropic thinking budgets; off maps to disabled', () => {
+  test('declared levels map to anthropic thinking budgets plus explicit effort; off maps to disabled', () => {
     syncDeclaredThinkingOptions([relayConn()]);
     try {
       assert.deepEqual(
@@ -615,13 +615,13 @@ describe('buildProviderOptions: anthropic-compatible relay thinking', () => {
       const connection = relayConn();
       const modelId = 'kimi-coding-apikey/k3';
       assert.deepEqual(buildProviderOptions(connection, modelId, 'low'), {
-        anthropic: { thinking: { type: 'enabled', budgetTokens: 1024 } },
+        anthropic: { thinking: { type: 'enabled', budgetTokens: 1024 }, effort: 'low' },
       });
       assert.deepEqual(buildProviderOptions(connection, modelId, 'medium'), {
-        anthropic: { thinking: { type: 'enabled', budgetTokens: 8192 } },
+        anthropic: { thinking: { type: 'enabled', budgetTokens: 8192 }, effort: 'medium' },
       });
       assert.deepEqual(buildProviderOptions(connection, modelId, 'high'), {
-        anthropic: { thinking: { type: 'enabled', budgetTokens: 32768 } },
+        anthropic: { thinking: { type: 'enabled', budgetTokens: 32768 }, effort: 'high' },
       });
       assert.deepEqual(buildProviderOptions(connection, modelId, 'off'), {
         anthropic: { thinking: { type: 'disabled' } },
@@ -629,6 +629,29 @@ describe('buildProviderOptions: anthropic-compatible relay thinking', () => {
       // No level (default) and undeclared levels send nothing.
       assert.deepEqual(buildProviderOptions(connection, modelId), {});
       assert.deepEqual(buildProviderOptions(connection, modelId, 'max'), {});
+    } finally {
+      syncDeclaredThinkingOptions([]);
+    }
+  });
+
+  test('max sends the enum effort with a top budget; minimal travels as budget only', () => {
+    const connection = relayConn();
+    connection.models = [
+      {
+        id: 'kimi-coding-apikey/k3',
+        thinkingOptions: { efforts: ['minimal', 'low', 'high', 'max'] },
+      },
+    ];
+    syncDeclaredThinkingOptions([connection]);
+    try {
+      // budget_tokens alone caps at "high" on budget-mapping relays (e.g.
+      // OmniRoute budgetToEffort), so max must carry the explicit enum effort.
+      assert.deepEqual(buildProviderOptions(connection, 'kimi-coding-apikey/k3', 'max'), {
+        anthropic: { thinking: { type: 'enabled', budgetTokens: 131072 }, effort: 'max' },
+      });
+      assert.deepEqual(buildProviderOptions(connection, 'kimi-coding-apikey/k3', 'minimal'), {
+        anthropic: { thinking: { type: 'enabled', budgetTokens: 1024 } },
+      });
     } finally {
       syncDeclaredThinkingOptions([]);
     }

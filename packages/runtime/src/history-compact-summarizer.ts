@@ -1,4 +1,9 @@
-import { rawFinishReasonString, type ModelMessage } from './model-protocol.js';
+import {
+  rawFinishReasonString,
+  type ModelMessage,
+  type ToolCallPart,
+  type ToolResultPart,
+} from './model-protocol.js';
 import { buildRuntimeEventModelReplayPlan } from './model-history.js';
 import { toolResultOutput } from './tool-result-output.js';
 import type {
@@ -205,8 +210,25 @@ type ReplayPlanItems = ReturnType<typeof buildRuntimeEventModelReplayPlan>['item
 
 export function replayPlanItemsToModelMessages(items: ReplayPlanItems): ModelMessage[] {
   const out: ModelMessage[] = [];
+  // Parallel tool calls in one model step arrive as consecutive tool_call
+  // items. They must stay in ONE assistant message (and their results in ONE
+  // tool message): strict providers (Kimi, OpenAI) reject an assistant
+  // message whose tool_calls are not immediately followed by a tool message
+  // answering every id, so one-message-per-call replays fail validation.
+  let pendingToolCalls: ToolCallPart[] | undefined;
+  let pendingToolResults: ToolResultPart[] | undefined;
+  const flushToolCalls = (): void => {
+    if (pendingToolCalls?.length) out.push({ role: 'assistant', content: pendingToolCalls });
+    pendingToolCalls = undefined;
+  };
+  const flushToolResults = (): void => {
+    if (pendingToolResults?.length) out.push({ role: 'tool', content: pendingToolResults });
+    pendingToolResults = undefined;
+  };
   for (const item of items) {
     if (item.kind === 'text') {
+      flushToolCalls();
+      flushToolResults();
       // Split on role so each push matches exactly one ModelMessage arm — no cast.
       const textPart = { type: 'text' as const, text: item.content };
       if (item.role === 'user') {
@@ -215,31 +237,100 @@ export function replayPlanItemsToModelMessages(items: ReplayPlanItems): ModelMes
         out.push({ role: 'assistant', content: [textPart] });
       }
     } else if (item.kind === 'tool_call') {
-      out.push({
-        role: 'assistant',
-        content: [
-          {
-            type: 'tool-call',
-            toolCallId: item.toolCallId,
-            toolName: item.toolName,
-            input: item.input,
-          },
-        ],
+      flushToolResults();
+      pendingToolCalls ??= [];
+      pendingToolCalls.push({
+        type: 'tool-call',
+        toolCallId: item.toolCallId,
+        toolName: item.toolName,
+        input: item.input,
       });
     } else if (item.kind === 'tool_result') {
-      out.push({
-        role: 'tool',
-        content: [
-          {
-            type: 'tool-result',
-            toolCallId: item.toolCallId,
-            toolName: item.toolName,
-            output: toolResultOutput(item.output, item.isError),
-          },
-        ],
+      flushToolCalls();
+      pendingToolResults ??= [];
+      pendingToolResults.push({
+        type: 'tool-result',
+        toolCallId: item.toolCallId,
+        toolName: item.toolName,
+        output: toolResultOutput(item.output, item.isError),
       });
     }
     // thinking entries are intentionally skipped for summarization
   }
+  flushToolCalls();
+  flushToolResults();
+  repairToolMessagePairing(out);
   return out;
+}
+
+/**
+ * The event ledger can record a slow tool's result AFTER the next model step's
+ * calls (results append on completion; store write order is not conversation
+ * order). Strict providers require every assistant tool_call to be answered by
+ * the IMMEDIATELY following tool message, so pull late results forward into
+ * their own step's tool message. A call whose result was never recorded
+ * (interrupted session) gets a synthesized error result, and orphan results
+ * whose call never replayed are dropped — either deviation fails provider
+ * validation and would block compaction (and session recap) entirely.
+ */
+function repairToolMessagePairing(messages: ModelMessage[]): void {
+  const toolCallsOf = (message: ModelMessage | undefined): ToolCallPart[] =>
+    message?.role === 'assistant' && Array.isArray(message.content)
+      ? message.content.filter((part): part is ToolCallPart => part.type === 'tool-call')
+      : [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const calls = toolCallsOf(messages[i]);
+    if (calls.length === 0) continue;
+    let answeringMessage = messages[i + 1];
+    if (answeringMessage?.role !== 'tool') {
+      answeringMessage = { role: 'tool', content: [] };
+      messages.splice(i + 1, 0, answeringMessage);
+    }
+    const answered = new Set(
+      answeringMessage.content
+        .filter((part): part is ToolResultPart => part.type === 'tool-result')
+        .map((part) => part.toolCallId),
+    );
+    for (const call of calls) {
+      if (answered.has(call.toolCallId)) continue;
+      let moved = false;
+      for (let j = i + 2; j < messages.length && !moved; j++) {
+        const candidate = messages[j];
+        if (candidate.role !== 'tool') continue;
+        const index = candidate.content.findIndex(
+          (part) => part.type === 'tool-result' && part.toolCallId === call.toolCallId,
+        );
+        if (index < 0) continue;
+        const [part] = candidate.content.splice(index, 1);
+        answeringMessage.content.push(part as ToolResultPart);
+        moved = true;
+      }
+      if (!moved) {
+        answeringMessage.content.push({
+          type: 'tool-result',
+          toolCallId: call.toolCallId,
+          toolName: call.toolName,
+          output: {
+            type: 'error-text',
+            value:
+              '[tool result unavailable — the session ended before this result was recorded]',
+          },
+        });
+      }
+    }
+  }
+
+  // Drop orphan results (their call never replayed) and now-empty tool messages.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role !== 'tool') continue;
+    let k = i - 1;
+    while (k >= 0 && messages[k].role === 'tool') k--;
+    const callIds = new Set(toolCallsOf(messages[k]).map((call) => call.toolCallId));
+    message.content = message.content.filter(
+      (part) => part.type !== 'tool-result' || callIds.has(part.toolCallId),
+    );
+    if (message.content.length === 0) messages.splice(i, 1);
+  }
 }

@@ -12,8 +12,10 @@ import type { LlmCallRecord } from '@maka/core/usage-stats/types';
 import type { HistoryCompactSummaryInput } from '../ai-sdk-compaction-contract.js';
 import {
   buildLlmHistorySummarizer,
+  replayPlanItemsToModelMessages,
   type AiSdkGenerateTextLike,
 } from '../history-compact-summarizer.js';
+import type { RuntimeEventModelReplayItem } from '../model-history.js';
 import { buildHistoryCompactCheckpoint } from '../history-compact-checkpoint.js';
 
 const ts = 1_700_000_000_000;
@@ -286,5 +288,95 @@ describe('buildLlmHistorySummarizer', () => {
     expect(serialized).toContain('PRIOR_SUMMARY');
     expect(serialized).toContain('NEWLY_EVICTED_RAW');
     expect(serialized.includes('ALREADY_SUMMARIZED_RAW')).toBe(false);
+  });
+});
+
+describe('replayPlanItemsToModelMessages tool pairing', () => {
+  let itemSeq = 0;
+  const call = (toolCallId: string, toolName = 'read'): RuntimeEventModelReplayItem => {
+    itemSeq += 1;
+    return {
+      kind: 'tool_call',
+      toolCallId,
+      toolName,
+      input: {},
+      eventId: `evt-c-${itemSeq}`,
+      ts: ts + itemSeq,
+    };
+  };
+  const result = (
+    toolCallId: string,
+    toolName = 'read',
+    output: unknown = 'ok',
+  ): RuntimeEventModelReplayItem => {
+    itemSeq += 1;
+    return {
+      kind: 'tool_result',
+      toolCallId,
+      toolName,
+      output,
+      isError: false,
+      eventId: `evt-r-${itemSeq}`,
+      ts: ts + itemSeq,
+    };
+  };
+
+  type ToolCallish = { type: string; toolCallId?: string };
+  const parts = (message: { content: unknown }): ToolCallish[] =>
+    Array.isArray(message.content) ? (message.content as ToolCallish[]) : [];
+
+  test('coalesces parallel calls into one assistant message answered by one tool message', () => {
+    const messages = replayPlanItemsToModelMessages([
+      call('a'),
+      call('b'),
+      result('a'),
+      result('b'),
+    ]);
+
+    expect(messages.map((m) => m.role)).toEqual(['assistant', 'tool']);
+    expect(parts(messages[0]!).map((p) => p.toolCallId)).toEqual(['a', 'b']);
+    expect(parts(messages[1]!).map((p) => p.toolCallId)).toEqual(['a', 'b']);
+  });
+
+  test('pulls a late-recorded result forward into its own step', () => {
+    // The ledger recorded step 2's calls before step 1's slow Read result.
+    const messages = replayPlanItemsToModelMessages([
+      call('a'),
+      call('b'),
+      result('a'),
+      call('c'),
+      call('d'),
+      result('b'),
+      result('c'),
+      result('d'),
+    ]);
+
+    expect(messages.map((m) => m.role)).toEqual(['assistant', 'tool', 'assistant', 'tool']);
+    expect(parts(messages[1]!).map((p) => p.toolCallId)).toEqual(['a', 'b']);
+    expect(parts(messages[3]!).map((p) => p.toolCallId)).toEqual(['c', 'd']);
+  });
+
+  test('synthesizes an error result for a call whose result was never recorded', () => {
+    const messages = replayPlanItemsToModelMessages([call('a'), call('b'), result('a')]);
+
+    expect(messages.map((m) => m.role)).toEqual(['assistant', 'tool']);
+    const toolParts = parts(messages[1]!) as Array<{
+      toolCallId: string;
+      output?: { type: string; value: unknown };
+    }>;
+    expect(toolParts.map((p) => p.toolCallId)).toEqual(['a', 'b']);
+    expect(toolParts[1]!.output?.type).toBe('error-text');
+    expect(String(toolParts[1]!.output?.value)).toContain('unavailable');
+  });
+
+  test('drops orphan results whose call never replayed', () => {
+    const messages = replayPlanItemsToModelMessages([
+      call('a'),
+      result('a'),
+      result('ghost'),
+    ]);
+
+    expect(messages.map((m) => m.role)).toEqual(['assistant', 'tool']);
+    expect(parts(messages[1]!).map((p) => p.toolCallId)).toEqual(['a']);
   });
 });

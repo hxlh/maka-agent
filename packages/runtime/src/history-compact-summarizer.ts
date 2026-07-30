@@ -92,6 +92,11 @@ const SUMMARIZATION_SYSTEM_PROMPT = [
   'Keep each section concise. Preserve exact file paths, function names, commands, and error messages.',
 ].join('\n');
 
+// Closing instruction appended as the final user message, so the summarization
+// request never ends on an assistant turn (see buildLlmHistorySummarizer).
+const SUMMARY_REQUEST_TEXT =
+  'Write the structured summary of the conversation above now, using the exact format requested.';
+
 export function buildLlmHistorySummarizer(options: BuildLlmHistorySummarizerOptions) {
   return async (input: HistoryCompactSummaryInput): Promise<string | undefined> => {
     const newlyFoldedRuntimeEvents =
@@ -110,6 +115,18 @@ export function buildLlmHistorySummarizer(options: BuildLlmHistorySummarizerOpti
             },
           ],
         });
+      }
+      // End on a user instruction. A replay typically ends with the assistant's
+      // last answer, which asks the provider to CONTINUE an assistant turn —
+      // Anthropic treats that as prefill, but stricter relay endpoints (Kimi
+      // k3) return an empty response and the gateway surfaces it as a 502,
+      // failing every compaction. Merging into a trailing user message avoids
+      // consecutive user messages for relays that validate strict alternation.
+      const lastMessage = messages[messages.length - 1];
+      if (lastMessage?.role === 'user' && Array.isArray(lastMessage.content)) {
+        lastMessage.content.push({ type: 'text', text: SUMMARY_REQUEST_TEXT });
+      } else {
+        messages.push({ role: 'user', content: [{ type: 'text', text: SUMMARY_REQUEST_TEXT }] });
       }
       const providerRequestTracker = options.providerRequestTracking
         ? new ProviderRequestTracker({
@@ -229,12 +246,27 @@ export function replayPlanItemsToModelMessages(items: ReplayPlanItems): ModelMes
     if (item.kind === 'text') {
       flushToolCalls();
       flushToolResults();
-      // Split on role so each push matches exactly one ModelMessage arm — no cast.
+      // Merge into a directly preceding same-role text-only message: strict
+      // relays reject consecutive same-role messages, and a text run has no
+      // protocol reason to split.
       const textPart = { type: 'text' as const, text: item.content };
+      const previous = out[out.length - 1];
       if (item.role === 'user') {
-        out.push({ role: 'user', content: [textPart] });
+        if (previous?.role === 'user' && Array.isArray(previous.content)) {
+          previous.content.push(textPart);
+        } else {
+          out.push({ role: 'user', content: [textPart] });
+        }
       } else {
-        out.push({ role: 'assistant', content: [textPart] });
+        if (
+          previous?.role === 'assistant' &&
+          Array.isArray(previous.content) &&
+          previous.content.every((part) => part.type === 'text')
+        ) {
+          previous.content.push(textPart);
+        } else {
+          out.push({ role: 'assistant', content: [textPart] });
+        }
       }
     } else if (item.kind === 'tool_call') {
       flushToolResults();

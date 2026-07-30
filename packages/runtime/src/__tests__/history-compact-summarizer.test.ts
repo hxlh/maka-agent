@@ -195,6 +195,36 @@ describe('buildLlmHistorySummarizer', () => {
     expect(toolPart.output).toEqual({ type: 'json', value: { name: 'maka' } });
   });
 
+  test('ends the summarization request with a user instruction, never an assistant turn', async () => {
+    let seen: Parameters<AiSdkGenerateTextLike>[0] | undefined;
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async (options) => {
+        seen = options;
+        return { text: '## Goal\nX' };
+      },
+    });
+
+    // The folded ledger ends with the assistant's final answer; without a
+    // trailing user message the provider would have to continue an assistant
+    // turn, which strict relay endpoints (Kimi k3) answer with empty content.
+    await summarize(
+      inputWith([
+        ev({ role: 'user', author: 'user', content: { kind: 'text', text: '做 X' } }),
+        ev({ role: 'model', author: 'agent', content: { kind: 'text', text: '做完了' } }),
+      ]),
+    );
+
+    const last = seen!.messages[seen!.messages.length - 1] as {
+      role: string;
+      content: Array<{ type: string; text?: string }>;
+    };
+    expect(last.role).toBe('user');
+    expect(last.content.some((part) => part.type === 'text' && part.text?.includes('summary'))).toBe(
+      true,
+    );
+  });
+
   test('surfaces provider failures so the runtime can report the real compact reason', async () => {
     const generateText: AiSdkGenerateTextLike = async () => {
       throw new Error('model down');
@@ -378,5 +408,27 @@ describe('replayPlanItemsToModelMessages tool pairing', () => {
 
     expect(messages.map((m) => m.role)).toEqual(['assistant', 'tool']);
     expect(parts(messages[1]!).map((p) => p.toolCallId)).toEqual(['a']);
+  });
+
+  test('merges consecutive same-role text messages into one', () => {
+    const text = (
+      role: 'user' | 'assistant',
+      content: string,
+    ): RuntimeEventModelReplayItem => {
+      itemSeq += 1;
+      return { kind: 'text', role, content, eventId: `evt-t-${itemSeq}`, ts: ts + itemSeq };
+    };
+    const messages = replayPlanItemsToModelMessages([
+      text('assistant', 'first'),
+      text('assistant', 'second'),
+      text('user', 'question'),
+      text('user', 'follow-up'),
+    ]);
+
+    expect(messages.map((m) => m.role)).toEqual(['assistant', 'user']);
+    expect(JSON.stringify(messages[0])).toContain('first');
+    expect(JSON.stringify(messages[0])).toContain('second');
+    expect(JSON.stringify(messages[1])).toContain('question');
+    expect(JSON.stringify(messages[1])).toContain('follow-up');
   });
 });
